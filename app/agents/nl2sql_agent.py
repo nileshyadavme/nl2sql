@@ -7,6 +7,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.database.connection import DatabaseConnection
 from app.database.schema_inspector import SchemaInspector
+from app.agents.prompts import build_sql_generation_prompt, build_human_answer_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -81,16 +82,7 @@ class NL2SQLAgent:
             schema_str = self.schema_inspector.get_schema_prompt()
 
             # 2. Generate SQL (API Call 1)
-            sql_prompt = f"""You are an expert PostgreSQL developer.
-Given the following database schema:
-{schema_str}
-
-Write a strictly valid PostgreSQL query to answer this user question: "{question}"
-- Output NOTHING BUT the raw SQL query. Do not wrap it in markdown or ```sql.
-- Only use tables and columns that exist in the schema.
-- Limit results to {max_rows} rows unless the user specifically asks for less.
-- Never write destructive queries like DROP, DELETE, or UPDATE.
-"""
+            sql_prompt = build_sql_generation_prompt(schema_str, question, max_rows)
             sql_response = self.llm.invoke(sql_prompt)
             sql_query = sql_response.content.strip()
             # Clean up just in case the LLM ignores instructions and adds markdown
@@ -109,15 +101,7 @@ Write a strictly valid PostgreSQL query to answer this user question: "{question
                 # 4. Generate Answer and Explanation (API Call 2)
                 # Send the question, the SQL, and a snippet of the data back to get a nice answer
                 data_snippet = str(rows[:5])
-                answer_prompt = f"""You are an AI assistant answering a user's question about their database.
-User Question: "{question}"
-SQL Query Executed: {sql_query}
-Data Returned (first 5 rows): {data_snippet}
-
-Provide a short, friendly response.
-1. Answer the user's question directly based on the data.
-2. In a new paragraph starting with "Explanation:", explain in 1 simple sentence what the SQL query did.
-"""
+                answer_prompt = build_human_answer_prompt(question, sql_query, data_snippet)
                 final_response = self.llm.invoke(answer_prompt)
                 final_text = final_response.content.strip()
                 
