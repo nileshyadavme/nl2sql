@@ -4,7 +4,8 @@ from datetime import datetime
 from typing import List, Dict
 from pathlib import Path
 
-HISTORY_FILE = Path(".nl2sql_history.json")
+# Anchor to project root (3 levels up from this file: utils → app → project root)
+HISTORY_FILE = Path(__file__).parent.parent.parent / ".nl2sql_history.json"
 MAX_HISTORY = 50
 
 

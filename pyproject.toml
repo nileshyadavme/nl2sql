@@ -1,0 +1,20 @@
+[project]
+name = "nl2sql"
+version = "0.1.0"
+description = "Natural Language to SQL agent powered by Gemini"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "streamlit==1.35.0",
+    "langchain==0.2.1",
+    "langchain-community==0.2.1",
+    "langchain-google-genai==1.0.6",
+    "sqlalchemy==2.0.30",
+    "psycopg2-binary==2.9.9",
+    "plotly==5.22.0",
+    "pandas>=2.2.2",
+    "python-dotenv==1.0.1",
+    "tenacity==8.3.0",
+    "pytest==8.2.1",
+    "pytest-mock==3.14.0",
+]

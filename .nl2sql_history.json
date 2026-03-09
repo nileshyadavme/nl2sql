@@ -1,0 +1,34 @@
+[
+  {
+    "id": 4,
+    "timestamp": "2026-03-09T17:26:15.300021",
+    "question": "Products with highest return rate",
+    "sql": "WITH ProductReturnCounts AS (\n    SELECT\n        oi.product_id,\n        COUNT(oi.id) AS total_ordered,\n        COUNT(r.id) AS total_returned\n    FROM order_items oi\n    LEFT JOIN returns r ON oi.order_id = r.order_id\n    GROUP BY oi.product_id\n)\nSELECT\n    p.name AS product_name,\n    CAST(prc.total_returned AS REAL) / prc.total_ordered AS return_rate\nFROM ProductReturnCounts prc\nJOIN products p ON prc.product_id = p.id\nWHERE prc.total_ordered > 0\nORDER BY return_rate DESC\nLIMIT 500;",
+    "answer": "The products with the highest return rates are Coffee Maker (50%), Yoga Mat (25%), and Running Shoes (25%).",
+    "success": true
+  },
+  {
+    "id": 3,
+    "timestamp": "2026-03-09T17:22:29.965318",
+    "question": "Products with highest return rate",
+    "sql": "WITH ProductReturnCounts AS (\n    SELECT\n        oi.product_id,\n        COUNT(DISTINCT oi.order_id) AS total_orders_with_product,\n        COUNT(DISTINCT r.order_id) AS returned_orders_with_product\n    FROM order_items oi\n    LEFT JOIN returns r ON oi.order_id = r.order_id\n    GROUP BY oi.product_id\n)\nSELECT\n    p.name AS product_name,\n    CASE\n        WHEN prc.total_orders_with_product = 0 THEN 0.0\n        ELSE (CAST(prc.returned_orders_with_product AS NUMERIC) / prc.total_orders_with_product) * 100.0\n    END AS return_rate\nFROM products p\nJOIN ProductReturnCounts prc ON p.id = prc.product_id\nORDER BY return_rate DESC\nLIMIT 500;",
+    "answer": "The products with the highest return rates are Coffee Maker, Running Shoes, Yoga Mat, Wireless Earbuds, and Resistance Bands.",
+    "success": true
+  },
+  {
+    "id": 2,
+    "timestamp": "2026-03-09T17:15:08.894253",
+    "question": "Products with highest return rate",
+    "sql": "",
+    "answer": "I encountered an error: An output parsing error occurred. In order to pass this error back to the agent and have it try again, pass `handle_parsing_errors=True` to the AgentExecutor. This is the error: Parsing LLM output produced both a final answer and a parse-able action:: The query checker has va...",
+    "success": false
+  },
+  {
+    "id": 1,
+    "timestamp": "2026-03-09T17:01:54.418066",
+    "question": "Monthly sales trend for 2024",
+    "sql": "Could not extract SQL",
+    "answer": "The monthly sales trend for 2024 is as follows:\n- January: 8397.00\n- February: 6896.00\n- March: 3897.00\n- April: 4897.00\n- May: 10296.00\n- June: 1299.00\n- July: 3499.00\n- August: 799.00\n- September: 2498.00\n- October: 4999.00\n- November: 1798.00\n- December: 5498.00",
+    "success": true
+  }
+]

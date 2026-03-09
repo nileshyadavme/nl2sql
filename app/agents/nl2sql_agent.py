@@ -3,11 +3,7 @@ import re
 from typing import Optional
 from dataclasses import dataclass, field
 
-from langchain_openai import ChatOpenAI
-from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits import create_sql_agent
-from langchain.agents.agent_types import AgentType
-from langchain.prompts import PromptTemplate
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.database.connection import DatabaseConnection
 from app.database.schema_inspector import SchemaInspector
@@ -53,73 +49,95 @@ After getting results, always:
 
 class NL2SQLAgent:
     """
-    LangChain-powered agent that converts natural language to SQL.
+    Lightweight, highly-optimized agent that converts natural language to SQL.
 
-    Pipeline:
-      Question → LangChain SQL Agent → Schema Lookup → SQL Generation
-               → SQL Execution → Auto-Retry on Error → Answer + Explanation
+    Pipeline (2 API Calls ONLY):
+      1. Schema + Question → LLM → SQL Generation
+      2. App executes SQL locally.
+      3. SQL + Data → LLM → Answer & Explanation
     """
 
-    def __init__(self, db: DatabaseConnection, openai_api_key: str, model: str = "gpt-4o"):
+    def __init__(self, db: DatabaseConnection, gemini_api_key: str, model: str = "gemini-2.5-flash-lite"):
         self.db = db
         self.schema_inspector = SchemaInspector(db)
 
-        # LangChain SQLDatabase wrapper (used by the agent tools)
-        self.sql_db = SQLDatabase(
-            engine=db.get_engine(),
-            sample_rows_in_table_info=3,   # show 3 sample rows per table in prompt
-        )
-
-        # GPT-4o LLM
-        self.llm = ChatOpenAI(
+        # Gemini LLM
+        self.llm = ChatGoogleGenerativeAI(
             model=model,
             temperature=0,
-            openai_api_key=openai_api_key,
+            google_api_key=gemini_api_key,
         )
 
-        # Build the LangChain SQL agent
-        self.agent = create_sql_agent(
-            llm=self.llm,
-            db=self.sql_db,
-            agent_type=AgentType.OPENAI_FUNCTIONS,
-            prefix=SYSTEM_PREFIX,
-            verbose=True,
-            max_iterations=10,          # max tool calls before giving up
-            handle_parsing_errors=True,
-        )
-
-        logger.info(f"NL2SQLAgent initialised with model={model}")
+        logger.info(f"NL2SQLAgent initialised with direct prompting pipeline (model={model})")
 
     def run(self, question: str, max_rows: int = 500) -> AgentResult:
         """
-        Run the full NL2SQL pipeline for a given natural language question.
-        Returns a structured AgentResult with SQL, answer, and data.
+        Run the full NL2SQL pipeline efficiently with minimal API calls.
         """
         logger.info(f"Processing question: '{question}'")
 
         try:
-            # Run the agent — it will loop: schema → sql → execute → maybe retry
-            response = self.agent.invoke({"input": question})
-            agent_output = response.get("output", "")
+            # 1. Fetch schema locally (0 API calls)
+            schema_str = self.schema_inspector.get_schema_prompt()
 
-            # Extract SQL from agent's intermediate steps
-            sql_query = self._extract_sql(response)
+            # 2. Generate SQL (API Call 1)
+            sql_prompt = f"""You are an expert PostgreSQL developer.
+Given the following database schema:
+{schema_str}
 
-            # If we got SQL, execute it ourselves to get structured data
+Write a strictly valid PostgreSQL query to answer this user question: "{question}"
+- Output NOTHING BUT the raw SQL query. Do not wrap it in markdown or ```sql.
+- Only use tables and columns that exist in the schema.
+- Limit results to {max_rows} rows unless the user specifically asks for less.
+- Never write destructive queries like DROP, DELETE, or UPDATE.
+"""
+            sql_response = self.llm.invoke(sql_prompt)
+            sql_query = sql_response.content.strip()
+            # Clean up just in case the LLM ignores instructions and adds markdown
+            sql_query = re.sub(r"^```(sql)?\s*|```\s*$", "", sql_query, flags=re.IGNORECASE).strip()
+
+            if not sql_query:
+                raise ValueError("LLM failed to generate a SQL query.")
+
+            # 3. Execute locally (0 API calls)
             columns, rows = [], []
-            if sql_query:
-                try:
-                    columns, rows = self.db.execute_query(sql_query, max_rows=max_rows)
-                except Exception as exec_err:
-                    logger.warning(f"Direct execution failed: {exec_err}")
+            answer = ""
+            explanation = ""
+            try:
+                columns, rows = self.db.execute_query(sql_query, max_rows=max_rows)
+                
+                # 4. Generate Answer and Explanation (API Call 2)
+                # Send the question, the SQL, and a snippet of the data back to get a nice answer
+                data_snippet = str(rows[:5])
+                answer_prompt = f"""You are an AI assistant answering a user's question about their database.
+User Question: "{question}"
+SQL Query Executed: {sql_query}
+Data Returned (first 5 rows): {data_snippet}
 
-            # Generate a plain-English explanation of the SQL
-            explanation = self._explain_sql(sql_query) if sql_query else ""
+Provide a short, friendly response.
+1. Answer the user's question directly based on the data.
+2. In a new paragraph starting with "Explanation:", explain in 1 simple sentence what the SQL query did.
+"""
+                final_response = self.llm.invoke(answer_prompt)
+                final_text = final_response.content.strip()
+                
+                # Split the answer and explanation
+                if "Explanation:" in final_text:
+                    parts = final_text.split("Explanation:")
+                    answer = parts[0].strip()
+                    explanation = parts[1].strip()
+                else:
+                    answer = final_text
+                    explanation = "This query selects data to answer your question."
+
+            except Exception as exec_err:
+                logger.warning(f"Direct execution failed: {exec_err}")
+                answer = f"I generated the SQL, but there was an error running it: {exec_err}"
 
             return AgentResult(
                 question=question,
-                sql_query=sql_query or "Could not extract SQL",
-                answer=agent_output,
+                sql_query=sql_query,
+                answer=answer,
                 explanation=explanation,
                 columns=columns,
                 rows=rows,
@@ -145,46 +163,6 @@ class NL2SQLAgent:
                 error=str(e),
                 success=False,
             )
-
-    def _extract_sql(self, agent_response: dict) -> str:
-        """
-        Extract the SQL query from the agent's intermediate steps.
-        The agent logs tool calls — we look for the SQLQuery tool call.
-        """
-        try:
-            steps = agent_response.get("intermediate_steps", [])
-            for step in steps:
-                if isinstance(step, tuple) and len(step) == 2:
-                    action = step[0]
-                    if hasattr(action, "tool") and "sql" in action.tool.lower():
-                        query = action.tool_input
-                        if isinstance(query, dict):
-                            query = query.get("query", "")
-                        if query:
-                            return query.strip()
-
-            # Fallback: regex extract from output text
-            output = agent_response.get("output", "")
-            match = re.search(r"```sql\s*(.*?)\s*```", output, re.DOTALL | re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-
-        except Exception as e:
-            logger.warning(f"SQL extraction failed: {e}")
-
-        return ""
-
-    def _explain_sql(self, sql: str) -> str:
-        """Ask the LLM to explain the SQL in plain English."""
-        if not sql or len(sql) < 10:
-            return ""
-        try:
-            response = self.llm.invoke(
-                f"Explain this SQL query in 1-2 simple sentences a non-technical person would understand:\n\n{sql}"
-            )
-            return response.content
-        except Exception:
-            return ""
 
     def get_schema_summary(self) -> str:
         """Return the schema as a formatted string."""

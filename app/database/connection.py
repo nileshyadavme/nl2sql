@@ -1,4 +1,5 @@
 import logging
+import re
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -45,14 +46,15 @@ class DatabaseConnection:
             echo=False,
         )
 
-        # Set statement timeout for every connection (PostgreSQL)
-        @event.listens_for(engine, "connect")
-        def set_timeout(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute(
-                f"SET statement_timeout = {self.query_timeout * 1000}"
-            )
-            cursor.close()
+        # Set statement timeout for every connection (PostgreSQL only)
+        if self.database_url.startswith("postgres"):
+            @event.listens_for(engine, "connect")
+            def set_timeout(dbapi_conn, connection_record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute(
+                    f"SET statement_timeout = {self.query_timeout * 1000}"
+                )
+                cursor.close()
 
         return engine
 
@@ -82,15 +84,20 @@ class DatabaseConnection:
         - Limits result rows to max_rows
         - Returns (columns, rows) tuple
         """
-        # Safety check: block write operations
+        # Safety check: block write operations in read-only mode.
+        # Splits on semicolons to catch multi-statement injections like "SELECT 1; DELETE ..."
         if self.read_only:
             banned = ["insert", "update", "delete", "drop", "truncate", "alter", "create"]
-            sql_lower = sql.strip().lower()
-            for keyword in banned:
-                if sql_lower.startswith(keyword):
-                    raise PermissionError(
-                        f"Write operation blocked: '{keyword.upper()}' is not allowed in read-only mode."
-                    )
+            # Split on semicolons and check each individual statement
+            statements = [s.strip() for s in re.split(r";+", sql) if s.strip()]
+            for stmt in statements:
+                stmt_lower = stmt.lower()
+                for keyword in banned:
+                    # Match keyword at start of statement (ignoring leading whitespace/comments)
+                    if re.match(rf"^\s*{keyword}\b", stmt_lower):
+                        raise PermissionError(
+                            f"Write operation blocked: '{keyword.upper()}' is not allowed in read-only mode."
+                        )
 
         with self.engine.connect() as conn:
             result = conn.execute(text(sql))
@@ -116,3 +123,9 @@ def get_db_connection(database_url: Optional[str] = None) -> DatabaseConnection:
             query_timeout=int(os.getenv("QUERY_TIMEOUT", "30")),
         )
     return _db_instance
+
+
+def reset_db_connection() -> None:
+    """Clear the cached singleton so the next call to get_db_connection() creates a fresh one."""
+    global _db_instance
+    _db_instance = None
